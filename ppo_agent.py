@@ -29,7 +29,7 @@ class Agent():
         self.critic = Critic(state_size, action_size, seed, fc1_units=criticFCunits[0], fc2_units=criticFCunits[1]).to(device)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=learning_rate)
 
-    def act(self, state, eps=0.):
+    def act(self, state):
         """Returns actions for given state as per current policy.
         
         Params
@@ -41,11 +41,15 @@ class Agent():
         with torch.no_grad():                                                      # turn off gradient computation
             action_values = self.actor(state)                                      # get action values from policy
         self.actor.train()                                                         # put actor in training mode
-
+        action_values = action_values.numpy()
         # Probabilistic Action Selection
-        for index in range(len(action_values)/2):
-            actions = [np.random.normal(action_values[2*index],action_values[2*index+1])]   # determine actions based on policy action values of mean and standard deviation
-        return actions
+        actionsarray = np.array([]).reshape([0,action_values[0].shape[1]])
+        for output in action_values[0]:
+            actions = np.array([])
+            for index in range(self.action_size):
+                actions = np.append(actions,np.random.normal(output[2*index],output[2*index+1]))   # determine actions based on policy action values of mean and standard deviation
+            actionsarray = np.vstack(actions)
+        return actionsarray
     
     def policy_ratios(self, policy_prime, policy_old, states, actions):
         """Returns ratios of probabilities for the new and old policies to return the actions taken for a given state
@@ -70,7 +74,7 @@ class Agent():
                 prob= []                                                               # intialize empty actions probabilities list
                 for mean,sd,action in zip(means,sds,actions):
                     prob.append(norm.pdf(action, loc=mean, scale=sd))                  # calculate the probaility from the PDF of selecting the action
-                probs.vstack(prob)
+                probs.stack(prob)
         return np.divide(probs_prime, probs_old)
     
     def advantage(self, states, actions, lambd, gamma):
@@ -86,11 +90,11 @@ class Agent():
         """
         advantages = np.array([])
         deltas = []
+        rt = self.policy_ratios(self.actor, self.actor_old, states, actions)            # calculate the iterative policy probability ratio for choosing these actions from these states
         for index, state in enumerate(states):
-            if index < states.shape[0]:                                                                         # exclude last index, since there is no next state
-                rt = self.policy_ratios(self.actor, self.actor_old, state, actions)                             # calculate the iterative policy probability ratio for choosing these actions from these states
-                deltas.append(rt + gamma*self.critic(states[index+1]) - self.critic(state))                     # calculate the delta terms at each iteration
-                advantages[index,:,:] = np.multiply(deltas,[(lambd*gamma)**n for n in range(len(states)-1)]).sum     # calculate advantage estimates at each iteration
+            if index < states.shape[0]:                                                 # exclude last index, since there is no next state
+                deltas.append(rt[index,:,:] + gamma*self.critic(states[index+1,:,:]) - self.critic(state)) # calculate the delta terms at each iteration
+                advantages[index,:,:] = np.multiply(deltas,[(lambd*gamma)**n for n in range(len(states)-1)]).sum # calculate advantage estimates at each iteration
         return advantages
 
     def clipped_surrogate(self, states, actions, advantages, epsilon=0.1):
@@ -103,13 +107,16 @@ class Agent():
             advantages (array-like): advantage estimates at each time step
             epsilon (float): clipping limit for surrogate function
         """
-        ratios = self.policy_ratios(self.actor, self.actor_old, states, actions)
-        Lclip = sum([min(ratio*advantage, max(1-epsilon,min(ratio,1+epsilon))*advantage)] for ratio, advantage in zip(ratios,advantages))
-        return Lclip
+        Lclip = np.zeros(1,self.action_size)
+        ratios = self.policy_ratios(self.actor, self.actor_old, states, actions)        # calculate probability ratios of current and old policies to take the actions at the given states
+        for ratio, advantage in zip(ratios, advantages):
+            Lclip.dstack((Lclip,[min(ratio[index]*advantage[index], max(1-epsilon,min(ratio[index],1+epsilon))*advantage[index]) for index in len(ratio)]))
+        return Lclip[:,:,1:].reshape(1,self.action_size,len(ratios))
 
-    def expectation_eval(self, states, actions, rewards):
+    def expectation_eval(self, states, rewards):
         pass
         #TODO: Implement value function vs. future reward comparison loss function
+
 
     def optimize(self, states, actions, rewards, advantages, epsilon, minibatch_size, optimization_epochs):
         """Update actor and critic weights using the clipped surrogate function
@@ -121,10 +128,10 @@ class Agent():
            advantages (array-like): advantage estimates at each time step
            epsilon (float): surrogate function clipping limit 
         """
-        #TODO: Implement minibatch sampling for actor/critic optimization
         for epoch in range(optimization_epochs):
+            #TODO: Implement minibatch sampling for actor/critic optimization
             #TODO: Implement policy and value network optimization
             self.actor.compile(optimizer=self.actor_optimizer, loss=-self.clipped_surrogate(states, actions, advantages, epsilon))
-            self.critic.compile(optimizer=self.critic_optimizer, loss=-self.expectation_eval(states, actions, rewards))
+            self.critic.compile(optimizer=self.critic_optimizer, loss=-self.expectation_eval(states, rewards))
         return 0
         

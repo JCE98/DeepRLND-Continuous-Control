@@ -23,10 +23,10 @@ class Actor(nn.Module):
         self.fc3 = nn.Linear(fc2_units, 2*action_size)
 
     def forward(self, state):
-        """Build a network that maps state -> action values."""
+        """Build a network that maps state -> action selection."""
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
-        return self.fc3(x)
+        return F.sigmoid(self.fc3(x))
     
 class Critic(nn.Module):
     """Critic (Value) Model"""
@@ -45,7 +45,7 @@ class Critic(nn.Module):
         self.seed = torch.manual_seed(seed)
         self.fc1 = nn.Linear(state_size, fc1_units)
         self.fc2 = nn.Linear(fc1_units, fc2_units)                      # fully connected layer 2
-        self.fc3 = nn.Linear(fc2_units, action_size)                              # single action value estimate output
+        self.fc3 = nn.Linear(fc2_units, 1)                              # single action value estimate output
 
     def forward(self, state):
         """Build a network that maps state -> action values."""
