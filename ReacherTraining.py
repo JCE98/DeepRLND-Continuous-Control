@@ -2,7 +2,7 @@
 import argparse, warnings, os
 from unityagents import UnityEnvironment
 import numpy as np
-from PPOAgentv3 import Agent
+from PPOAgent import Agent
 
 # command line argument parser
 def checkArguments(args):
