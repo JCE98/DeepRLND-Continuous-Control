@@ -26,7 +26,7 @@ def argparser():
     parser.add_argument("--trajectory_segment", type=int, nargs='?', default=100)
     parser.add_argument("--epsilon_clip", type=float, nargs='?', default=0.1, help="clipping value for optimization surrogate function")
     parser.add_argument("--optimization_epochs", type=int, nargs='?', default=10, help="# of epochs over which to optimize the surrogate function")
-    parser.add_argument("--minibatch_size", type=int, nargs='?', default=500, help="minibatch size for surrogate function optimization")
+    parser.add_argument("--minibatch_size", type=int, nargs='?', default=15, help="minibatch size for surrogate function optimization")
     parser.add_argument("--actorFCunits", type=list, nargs='?', default=[64,64], help="# of neurons in each FC layer of the actor network (list)")
     parser.add_argument("--criticFCunits", type=list, nargs='?', default=[64,64], help="# of neurons in each FC layer of the critic network (list)")
     args = parser.parse_args()
@@ -46,7 +46,7 @@ def ppo(env, args):
     state_size = states.shape[1]                                       # size of the state space
     env_info = env.reset(train_mode=False)[brain_name]                 # reset the environment    
     states = env_info.vector_observations                              # get the current state (for each agent)
-    agent = Agent(state_size, action_size, num_agents, args.trajectory_segment, args.learning_rate, args.actorFCunits, args.criticFCunits, seed=0)
+    agent = Agent(state_size, action_size, num_agents, args, seed=0)
     # training loop
     print("Entering training loop...")
     for episode in range(args.training_episodes):
@@ -59,11 +59,11 @@ def ppo(env, args):
         while iter <= args.episode_max:                                # contain number of iterations to episode max
             print(f"\t Epoch {epoch}")
             while iter % args.trajectory_segment != 0:                 # fixed-length trajectory segments
-                actions = agent.act(states)                            # select an action set for each agent
+                actions = agent.act(states).numpy()                    # select an action set for each agent
                 env_info = env.step(actions)[brain_name]               # send all actions to tne environment
                 next_states = env_info.vector_observations             # get next state (for each agent)
                 rewards = np.reshape(np.array(env_info.rewards),(num_agents,1))                   # get reward (for each agent)
-                agent.build_trajectory(states, actions, rewards, iter % args.trajectory_segment - 1) # log SAR triplets for optimization
+                agent.build_trajectory(states, actions, rewards, next_states) # log SARS quartuplets for optimization
                 dones = env_info.local_done                            # see if episode finished
                 scores += env_info.rewards                             # update the score (for each agent)
                 states = next_states                                   # roll over states to next time step
@@ -72,10 +72,10 @@ def ppo(env, args):
                 iter+=1                                                # increment iteration counter
             if np.any(dones):                                          # exit loop if episode is finished
                 break
-            agent.step(args)                                           # optimize policy using trajectories (NOT YET IMPLEMENTED)
+            agent.learn()                                              # optimize policy using trajectories (NOT YET IMPLEMENTED)
             iter+=1                                                    # increment iteration counter to move to next trajectory segment
             epoch+=1                                                   # increment epoch counter
-            agent.clearBuffer()                                        # clear experience replay buffer for trajectory segment
+            #agent.clearBuffer()                                        # clear experience replay buffer for trajectory segment
         print('Total score (averaged over agents) this episode: {}'.format(np.mean(scores)))
     print("Closing Unity environment...")
     env.close()

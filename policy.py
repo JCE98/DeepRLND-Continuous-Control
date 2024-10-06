@@ -1,6 +1,7 @@
 #Import Libraries
 import torch
 from torch import nn
+from torch import optim
 import numpy as np
 import torch.nn.functional as F
 from torch.distributions import Normal
@@ -30,12 +31,13 @@ class Actor(nn.Module):
         ======
             state (tensor): state input to actor neural network
         """
+        state = state.float()
         x = F.relu(self.fc1(state))                                             # input layer with relu activation 
         x = F.relu(self.fc2(x))                                                 # fully connected layer with relu activation
         mu = F.tanh(self.fc3(x))                                                # output layer with tanh activation (Gaussian location)
         sigma = F.sigmoid(self.fc3(x))                                          # output layer with sigmoid activation (Gaussian scale)
         return mu, sigma
-    
+    '''
     def act(self, state):
         """Select action based on policy
         Params
@@ -43,27 +45,26 @@ class Actor(nn.Module):
             state (tensor): state input to actor neural network
         """
         [mu, sigma] = self.forward(state)                                       # pass states to actor network to obtain Gaussian parameters
-        actions = np.zeros(mu.numpy()[0].shape)                                 # pre-allocate actions array
-        for row in range(actions.shape[0]):
-            for col in range(actions.shape[1]):
-                dist = Normal(mu.numpy()[0][row,col],sigma.numpy()[0][row,col]) # create Gaussian distribution
-                actions[row,col] = dist.sample()                                # sample action from Gaussian distribution
+        actions = torch.empty(mu.shape)                                            # pre-allocate actions array
+        for index, (loc, scale) in enumerate(zip(mu, sigma)):
+            dist = Normal(loc, scale)
+            actions[index] = dist.sample()
         return actions
     
-    def probs(self, state, action):
+    def probs(self, state, actions):
         """Determine probability of selecting an action based on policy
         Params
         ======
             state (tensor): state from which the selected action was taken
             action (array): action that was taken
         """
-        probs = np.zeros(action.shape)                                          # pre-allocate probabilities array
-        [mu, sigma] = self.forward(state)                                       # pass states to actor network to obtain Gaussian parameters
-        for index, pair in np.array(list(zip(mu.numpy[0],sigma.numpy[0]))):     
-            dist = Normal(pair(0), pair(1))                                     # create Gaussian distribution
-            probs[index] = dist.log_prob(action[index])
+        probs = torch.empty(actions.shape)                                # pre-allocate probabilities array
+        [mu, sigma] = self.forward(state)                                 # pass states to actor network to obtain Gaussian parameters
+        for index, (loc, scale) in enumerate(zip(mu, sigma)):     
+            dist = Normal(loc, scale)                                     # create Gaussian distributions
+            probs[index] = dist.log_prob(actions[index])                  # sample from distributions to obtain actions
         return probs
-
+    '''
 class Critic(nn.Module):
     """Critic (Value) Model"""
 
@@ -79,12 +80,13 @@ class Critic(nn.Module):
         """
         super(Critic, self).__init__()
         self.seed = torch.manual_seed(seed)
-        self.fc1 = nn.Linear(state_size, fc1_units)
-        self.fc2 = nn.Linear(fc1_units, fc2_units)                      # fully connected layer 2
-        self.fc3 = nn.Linear(fc2_units, 1)                              # single action value estimate output
+        self.fc1 = nn.Linear(state_size, fc1_units)                     # input layer
+        self.fc2 = nn.Linear(fc1_units, fc2_units)                      # fully connected layer
+        self.fc3 = nn.Linear(fc2_units, action_size)                    # action value estimate output
 
     def forward(self, state):
         """Build a network that maps state -> action values."""
+        state = state.float()
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
         return self.fc3(x)
