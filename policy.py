@@ -37,34 +37,7 @@ class Actor(nn.Module):
         mu = F.tanh(self.fc3(x))                                                # output layer with tanh activation (Gaussian location)
         sigma = F.sigmoid(self.fc3(x))                                          # output layer with sigmoid activation (Gaussian scale)
         return mu, sigma
-    '''
-    def act(self, state):
-        """Select action based on policy
-        Params
-        ======
-            state (tensor): state input to actor neural network
-        """
-        [mu, sigma] = self.forward(state)                                       # pass states to actor network to obtain Gaussian parameters
-        actions = torch.empty(mu.shape)                                            # pre-allocate actions array
-        for index, (loc, scale) in enumerate(zip(mu, sigma)):
-            dist = Normal(loc, scale)
-            actions[index] = dist.sample()
-        return actions
     
-    def probs(self, state, actions):
-        """Determine probability of selecting an action based on policy
-        Params
-        ======
-            state (tensor): state from which the selected action was taken
-            action (array): action that was taken
-        """
-        probs = torch.empty(actions.shape)                                # pre-allocate probabilities array
-        [mu, sigma] = self.forward(state)                                 # pass states to actor network to obtain Gaussian parameters
-        for index, (loc, scale) in enumerate(zip(mu, sigma)):     
-            dist = Normal(loc, scale)                                     # create Gaussian distributions
-            probs[index] = dist.log_prob(actions[index])                  # sample from distributions to obtain actions
-        return probs
-    '''
 class Critic(nn.Module):
     """Critic (Value) Model"""
 

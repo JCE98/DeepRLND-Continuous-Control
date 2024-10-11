@@ -1,8 +1,8 @@
 # import libraries
-import random, torch, math
+import random, torch, math, time
 from tqdm import tqdm
 import numpy as np
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, TensorDataset
 from torch.distributions import Normal
 from torch import optim
 from torch import nn
@@ -10,7 +10,7 @@ from policy import Actor, Critic
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-class Trajectories(Dataset):
+class Trajectories(TensorDataset):
     def __init__(self,trajectories):
         '''
         Params
@@ -81,6 +81,7 @@ class Agent():
 
         # experience collection
         self.trajectories = [[] for _ in range(num_agents)]
+        self.tensor_kwargs = {'device':device, 'dtype':torch.float32, 'requires_grad':True}
 
         # optimization parameters
         self.batch_size = args.minibatch_size
@@ -102,14 +103,12 @@ class Agent():
         ======
             actions (tensor[num_agents,action_size]): actions probabilistically selected based on current state
         """
-        state = torch.tensor(states)                                            # convert state array to tensor
-        [mu, sigma] = self.actor.forward(state)                                 # pass states to actor network to obtain Gaussian parameters
-        actions = torch.empty(mu.shape)                                         # pre-allocate actions tensor
-        for index, (loc, scale) in enumerate(zip(mu, sigma)):
+        [mu, sigma] = self.actor.forward(states)                                # pass states to actor network to obtain Gaussian parameters
+        actions = torch.tensor([], **self.tensor_kwargs)                        # pre-allocate actions tensor
+        for loc, scale in zip(mu, sigma):
             dist = Normal(loc, scale)                                           # form a Gaussian distribution with actor output
-            actions[index] = dist.sample()                                      # sample from the distribution to obtain action
-        #actions = self.actor.act(states)                                       # get actions from policy
-        return actions
+            actions = torch.cat((actions,dist.sample()))                        # sample from the distribution to obtain action
+        return torch.reshape(actions, (self.num_agents,self.action_size)).to('cpu')
 
     def build_trajectory(self, states, actions, rewards, next_states):
         '''Builds trajectory experience from stored numpy arrays of agent experiences
@@ -124,11 +123,32 @@ class Agent():
         List of trajectories consists of lists of tuples, containing SARS information at each timestep
         '''
         for i in range(len(self.trajectories)):
-            sars = (torch.tensor(states[i,:], requires_grad=True),
-                    torch.tensor(actions[i,:], requires_grad=True),
-                    torch.tensor(rewards[i], requires_grad=True),
-                    torch.tensor(next_states[i,:], requires_grad=True))     # convert numpy arrays from environment to tuples of tensors
-            self.trajectories[i].append(sars)                               # trajectories list consists of a lists of tuples
+            sars = (states[i,:],
+                    actions[i,:],
+                    rewards[i],
+                    next_states[i,:])                                       # preprocess tensors from environment to tuples of tensors
+            self.trajectories[i].append(sars)                               # trajectories list consists of trajectory lists of snapshot tuples
+
+    def printProgressBar (self, iteration, total, prefix = '', suffix = '', decimals = 1, length = 100, fill = '█', printEnd = "\r"):
+        """
+        Call in a loop to create terminal progress bar
+        @params:
+            iteration   - Required  : current iteration (Int)
+            total       - Required  : total iterations (Int)
+            prefix      - Optional  : prefix string (Str)
+            suffix      - Optional  : suffix string (Str)
+            decimals    - Optional  : positive number of decimals in percent complete (Int)
+            length      - Optional  : character length of bar (Int)
+            fill        - Optional  : bar fill character (Str)
+            printEnd    - Optional  : end character (e.g. "\r", "\r\n") (Str)
+        """
+        percent = ("{0:." + str(decimals) + "f}").format(100 * (iteration / float(total)))
+        filledLength = int(length * iteration // total)
+        bar = fill * filledLength + '-' * (length - filledLength)
+        print(f'\r\t\t{prefix} |{bar}| {percent}% {suffix}', end = printEnd)
+        # Print New Line on Complete
+        if iteration == total: 
+            print()
 
     def actionProbRatios(self,states,actions):
         """Determine probability of selecting an action based on policy
@@ -137,13 +157,18 @@ class Agent():
             states (tensor): state from which the selected action was taken
             actions (tensor): action that was taken
         """
-        probs = torch.empty(actions.shape)                                  # pre-allocate probabilities arrays
-        probs_old = torch.empty(actions.shape)
-        for policy, prob in zip([self.actor, self.actor_old], [probs, probs_old]):
+        probs = torch.tensor([], **self.tensor_kwargs)              # initialize probabilities arrays
+        probs_old = torch.tensor([], **self.tensor_kwargs)
+        for policy in [self.actor, self.actor_old]:
+            prob = torch.tensor([], **self.tensor_kwargs)
             [mu, sigma] = policy.forward(states)
             for index, (loc, scale) in enumerate(zip(mu, sigma)):
                 dist = Normal(loc, scale)
-                prob[index] = dist.log_prob(actions[index])
+                prob = torch.cat((prob, torch.reshape(dist.log_prob(actions[index]), (1,))))
+            if policy == self.actor:
+                probs = prob
+            else:
+                probs_old = prob
         return probs - probs_old
     
     def estimate_advantage(self):
@@ -194,23 +219,31 @@ class Agent():
 
     def learn(self):
         '''Perform minibatch sampling based optimization of actor and value function networks'''
+        print('\tOptimizing policy...')
+        start = time.time()
         self.estimate_advantage()                                   # advantage estimate for each snapshot
+        print(f'\t\tAdvantage estimate took {time.time()-start} seconds')
+        start = time.time()
         self.experience = Trajectories(self.trajectories)           # build dataset for minibatch sampling
         dataloader = DataLoader(dataset=self.experience, 
                                 batch_size=self.batch_size, 
                                 shuffle=True, num_workers=2)        # instantiate dataloader to perform minibatch sampling
+        print(f'\t\tLoading experiences into replay buffer took {time.time()-start} seconds')
         # Optimizers
         actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=self.learning_rate)
         critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=self.learning_rate)
 
+        start = time.time()
+        self.printProgressBar(0, self.optimization_epochs, prefix='Progress:',suffix = 'Complete', length = 50)
         for epoch in range(self.optimization_epochs):
-            Lclip = torch.tensor([], requires_grad=True)            # preallocating loss function constituent tensors
-            LVF = torch.tensor([], requires_grad=True)
-            with tqdm(total=self.batch_size, position=0, leave=True) as pbar:
-                for i, (states, probs, advantages) in tqdm(enumerate(dataloader), position=0, leave=True):
-                    Lclip = torch.cat((Lclip, self.clipped_surrogate(probs, advantages)))
-                    LVF = torch.cat((LVF, self.MSELoss(states, advantages)))# MSE loss for state/action value estimate
-                    pbar.update()
+            Lclip = torch.tensor([], **self.tensor_kwargs)          # preallocating loss function constituent tensors
+            LVF = torch.tensor([], **self.tensor_kwargs)
+            for i, (states, probs, advantages) in enumerate(dataloader):
+                states = states.to(device)
+                probs = probs.to(device)
+                advantages = advantages.to(device)
+                Lclip = torch.cat((Lclip, self.clipped_surrogate(probs, advantages)))
+                LVF = torch.cat((LVF, self.MSELoss(states, advantages)))# MSE loss for state/action value estimate
             loss = torch.mean(Lclip - LVF)                          # combining clipped surrogate function and MSE value function loss
             loss.backward()                                         # backward pass
             with torch.no_grad():
@@ -218,6 +251,7 @@ class Agent():
                 critic_optimizer.step()
             actor_optimizer.zero_grad()                             # empty gradients for next iteration
             critic_optimizer.zero_grad()
-            #pbar.set_description(f"epoch {epoch+1}/{self.optimization_epochs}", refresh=True)
-            #pbar.update()
+            self.printProgressBar(epoch+1, self.optimization_epochs, prefix='Progress:', suffix = 'Complete', length = 50)
+        self.actor_old = self.actor
+        print(f'\t\tOptimization over {self.optimization_epochs} epochs, with batch size {self.batch_size} took {time.time()-start} seconds')
         self.clear_buffer()                                         # empty trajectories for next segment

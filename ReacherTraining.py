@@ -2,6 +2,7 @@
 import argparse, warnings, os
 from unityagents import UnityEnvironment
 import numpy as np
+import torch
 from PPOAgent import Agent
 
 # command line argument parser
@@ -26,7 +27,7 @@ def argparser():
     parser.add_argument("--trajectory_segment", type=int, nargs='?', default=100)
     parser.add_argument("--epsilon_clip", type=float, nargs='?', default=0.1, help="clipping value for optimization surrogate function")
     parser.add_argument("--optimization_epochs", type=int, nargs='?', default=10, help="# of epochs over which to optimize the surrogate function")
-    parser.add_argument("--minibatch_size", type=int, nargs='?', default=15, help="minibatch size for surrogate function optimization")
+    parser.add_argument("--minibatch_size", type=int, nargs='?', default=32, help="minibatch size for surrogate function optimization")
     parser.add_argument("--actorFCunits", type=list, nargs='?', default=[64,64], help="# of neurons in each FC layer of the actor network (list)")
     parser.add_argument("--criticFCunits", type=list, nargs='?', default=[64,64], help="# of neurons in each FC layer of the critic network (list)")
     args = parser.parse_args()
@@ -37,6 +38,8 @@ def argparser():
 def ppo(env, args):
     # setup
     print("Performing environment setup and agent generation...")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    tensor_kwargs = {'device':device, 'dtype':torch.float32, 'requires_grad':True}
     brain_name = env.brain_names[0]                                    # get the default brain
     brain = env.brains[brain_name]
     env_info = env.reset(train_mode=True)[brain_name]                  # reset the environment
@@ -49,21 +52,23 @@ def ppo(env, args):
     agent = Agent(state_size, action_size, num_agents, args, seed=0)
     # training loop
     print("Entering training loop...")
+    avg_scores = np.array([])                                          # initialize array for episode average scores
     for episode in range(args.training_episodes):
         env_info = env.reset(train_mode=True)[brain_name]              # reset the environment    
         states = env_info.vector_observations                          # get the current state (for each agent)
         print(f"Episode {episode+1}:")
         iter = 1                                                       # initialize iteration counter for each episode
-        epoch = 1                                                      # initialize epoch counter for each episode
+        #epoch = 1                                                      # initialize epoch counter for each episode
         scores = np.zeros(num_agents)                                  # initialize the score (for each agent)
         while iter <= args.episode_max:                                # contain number of iterations to episode max
-            print(f"\t Epoch {epoch}")
+            print(f"\tGathering trajectories...")
             while iter % args.trajectory_segment != 0:                 # fixed-length trajectory segments
-                actions = agent.act(states).numpy()                    # select an action set for each agent
-                env_info = env.step(actions)[brain_name]               # send all actions to tne environment
-                next_states = env_info.vector_observations             # get next state (for each agent)
-                rewards = np.reshape(np.array(env_info.rewards),(num_agents,1))                   # get reward (for each agent)
-                agent.build_trajectory(states, actions, rewards, next_states) # log SARS quartuplets for optimization
+                states = torch.tensor(states, **tensor_kwargs)
+                actions = agent.act(states)                            # select an action set for each agent
+                env_info = env.step(actions.detach().numpy())[brain_name] # send all actions to tne environment
+                next_states = torch.tensor(env_info.vector_observations, **tensor_kwargs) # get next state (for each agent)
+                rewards = torch.tensor(env_info.rewards, **tensor_kwargs) # get reward (for each agent)
+                agent.build_trajectory(states, actions.to(device), rewards, next_states) # log SARS quartuplets for optimization
                 dones = env_info.local_done                            # see if episode finished
                 scores += env_info.rewards                             # update the score (for each agent)
                 states = next_states                                   # roll over states to next time step
@@ -72,11 +77,15 @@ def ppo(env, args):
                 iter+=1                                                # increment iteration counter
             if np.any(dones):                                          # exit loop if episode is finished
                 break
-            agent.learn()                                              # optimize policy using trajectories (NOT YET IMPLEMENTED)
+            agent.learn()                                              # optimize policy using trajectories
             iter+=1                                                    # increment iteration counter to move to next trajectory segment
-            epoch+=1                                                   # increment epoch counter
-            #agent.clearBuffer()                                        # clear experience replay buffer for trajectory segment
         print('Total score (averaged over agents) this episode: {}'.format(np.mean(scores)))
+        np.append(avg_scores,np.mean(scores))                          # append episode average score to assess environment solution
+        if(episode >= 99 and np.mean(avg_scores) >= 33):
+            print(f'Environment solved! Average score over 100 episodes: {np.mean(avg_scores[-100:])}') # solution exit criteria
+            break
+        if (episode==args.training_episodes-1):
+            print('Max training episodes reached!')
     print("Closing Unity environment...")
     env.close()
     print("Training Complete!")
@@ -111,7 +120,7 @@ if __name__=="__main__":
                 print("Loading agent checkpoint at %s..." % agentFile)
                 break
         print('\nBeginning Demonstration Run of Trained Agent...')
-        demoTrainedAgent(env,)
+        demoTrainedAgent(env,agentFile)
         pass
 
     # results post-processing
