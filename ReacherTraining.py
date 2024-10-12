@@ -3,6 +3,7 @@ import argparse, warnings, os
 from unityagents import UnityEnvironment
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 from PPOAgent import Agent
 
 # command line argument parser
@@ -89,6 +90,15 @@ def ppo(env, args):
     print("Closing Unity environment...")
     env.close()
     print("Training Complete!")
+
+    '''
+    plt.figure()
+    plt.plot(range(args.training_episodes),avg_scores)
+    plt.xlabel('Episode')
+    plt.yabel('Average Score')
+    plt.show()
+    '''
+
 
 def demoTrainedAgent(env, agentFile, n_episodes=100, max_t=200):
     #TODO: implement trained agent demonstration

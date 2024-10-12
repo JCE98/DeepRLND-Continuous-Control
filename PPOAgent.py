@@ -157,18 +157,20 @@ class Agent():
             states (tensor): state from which the selected action was taken
             actions (tensor): action that was taken
         """
-        probs = torch.tensor([], **self.tensor_kwargs)              # initialize probabilities arrays
-        probs_old = torch.tensor([], **self.tensor_kwargs)
-        for policy in [self.actor, self.actor_old]:
+        probs = torch.empty(actions.shape, **self.tensor_kwargs)              # initialize probabilities arrays
+        probs_old = torch.empty(actions.shape, **self.tensor_kwargs)
+        for idx, policy in enumerate([self.actor, self.actor_old]):
             prob = torch.tensor([], **self.tensor_kwargs)
             [mu, sigma] = policy.forward(states)
             for index, (loc, scale) in enumerate(zip(mu, sigma)):
                 dist = Normal(loc, scale)
                 prob = torch.cat((prob, torch.reshape(dist.log_prob(actions[index]), (1,))))
-            if policy == self.actor:
+            if idx == 0:
                 probs = prob
-            else:
+            elif idx == 1:
                 probs_old = prob
+            else:
+                raise Exception('Probabilities not assigned!')
         return probs - probs_old
     
     def estimate_advantage(self):
@@ -244,7 +246,7 @@ class Agent():
                 advantages = advantages.to(device)
                 Lclip = torch.cat((Lclip, self.clipped_surrogate(probs, advantages)))
                 LVF = torch.cat((LVF, self.MSELoss(states, advantages)))# MSE loss for state/action value estimate
-            loss = torch.mean(Lclip - LVF)                          # combining clipped surrogate function and MSE value function loss
+            loss = -torch.mean(Lclip - LVF)                         # combining clipped surrogate function and MSE value function loss
             loss.backward()                                         # backward pass
             with torch.no_grad():
                 actor_optimizer.step()                              # weights update
@@ -252,6 +254,6 @@ class Agent():
             actor_optimizer.zero_grad()                             # empty gradients for next iteration
             critic_optimizer.zero_grad()
             self.printProgressBar(epoch+1, self.optimization_epochs, prefix='Progress:', suffix = 'Complete', length = 50)
-        self.actor_old = self.actor
+        self.actor_old.parameters = self.actor.parameters()
         print(f'\t\tOptimization over {self.optimization_epochs} epochs, with batch size {self.batch_size} took {time.time()-start} seconds')
         self.clear_buffer()                                         # empty trajectories for next segment
