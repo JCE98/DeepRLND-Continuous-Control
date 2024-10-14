@@ -1,21 +1,9 @@
-# import libraries
-import argparse, warnings, os
-from unityagents import UnityEnvironment
+import argparse, warnings, torch, time
 import numpy as np
-import torch
 import matplotlib.pyplot as plt
-from PPOAgent import Agent
-
-# command line argument parser
-def checkArguments(args):
-    if ((args.trajectory_segment is not None and args.episode_max is not None) and (args.trajectory_segment > args.episode_max)):
-        raise Exception('Trajectory segment length provided is longer than the episode maximum number of iterations')
-    if args.mode != 'training' and args.mode != 'demo':
-        raise Exception("Invalid mode specified. Available modes are training and demo.")
-    if args.lambd < 0 or args.lambd > 1:
-        raise Exception('Lambda value must be between 0 and 1')
-    if args.gamma < 0 or args.gamma > 1:
-        raise Exception('Gamma value must be between 0 and 1')
+from ppo_agent import Agent
+from collections import deque
+from unityagents import UnityEnvironment
 
 def argparser():
     parser = argparse.ArgumentParser(description="Parse arguments for PPO agent training on Reacher application")
@@ -23,7 +11,8 @@ def argparser():
     parser.add_argument("--gamma", type=float, nargs='?', default=0.95, help="discount factor for future rewards, between 0 and 1")
     parser.add_argument("--lambd", type=float, nargs='?', default=0.9, help="advantage estimate discount factor, between 0 and 1")
     parser.add_argument("--training_episodes", type=int, nargs='?', default=2000, help="number of episodes to train agents")
-    parser.add_argument("--episode_max", type=int, nargs='?', default=1000, help="maximum number of iterations to run the episode")
+    parser.add_argument("--max_iterations", type=int, nargs='?', default=1000, help="maximum number of iterations to run the episode")
+    #parser.add_argument("--buffer_size", type=int, nargs='?', default=int(1e6), help="buffer size for experience replay")
     parser.add_argument("--learning_rate", type=float, nargs='?', default=1E-5, help="learning rate for agent optimization")
     parser.add_argument("--trajectory_segment", type=int, nargs='?', default=100)
     parser.add_argument("--epsilon_clip", type=float, nargs='?', default=0.1, help="clipping value for optimization surrogate function")
@@ -32,106 +21,66 @@ def argparser():
     parser.add_argument("--actorFCunits", type=list, nargs='?', default=[64,64], help="# of neurons in each FC layer of the actor network (list)")
     parser.add_argument("--criticFCunits", type=list, nargs='?', default=[64,64], help="# of neurons in each FC layer of the critic network (list)")
     args = parser.parse_args()
-    #Input processing / error handling
-    checkArguments(args)
     return args
 
 def ppo(env, args):
-    # setup
-    print("Performing environment setup and agent generation...")
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    tensor_kwargs = {'device':device, 'dtype':torch.float32, 'requires_grad':True}
-    brain_name = env.brain_names[0]                                    # get the default brain
+    brain_name = env.brain_names[0]
     brain = env.brains[brain_name]
-    env_info = env.reset(train_mode=True)[brain_name]                  # reset the environment
-    num_agents = len(env_info.agents)                                  # number of agents
-    action_size = brain.vector_action_space_size                       # size of action space
-    states = env_info.vector_observations                              # retrieve states from environment
-    state_size = states.shape[1]                                       # size of the state space
-    env_info = env.reset(train_mode=False)[brain_name]                 # reset the environment    
-    states = env_info.vector_observations                              # get the current state (for each agent)
-    agent = Agent(state_size, action_size, num_agents, args, seed=0)
-    # training loop
-    print("Entering training loop...")
-    avg_scores = np.array([])                                          # initialize array for episode average scores
+    env_info = env.reset(train_mode=False)[brain_name]
+    num_agents = len(env_info.agents)
+    state_size = env_info.vector_observations.shape[1]
+    action_size = brain.vector_action_space_size
+    scores_deque = deque(maxlen=100)                                                    # container to capture mean scores from each episode
+    agent = Agent(state_size, action_size, num_agents, args, random_seed=10)            # instantiate agent object
     for episode in range(args.training_episodes):
-        env_info = env.reset(train_mode=True)[brain_name]              # reset the environment    
-        states = env_info.vector_observations                          # get the current state (for each agent)
-        print(f"Episode {episode+1}:")
-        iter = 1                                                       # initialize iteration counter for each episode
-        #epoch = 1                                                      # initialize epoch counter for each episode
-        scores = np.zeros(num_agents)                                  # initialize the score (for each agent)
-        while iter <= args.episode_max:                                # contain number of iterations to episode max
-            print(f"\tGathering trajectories...")
-            while iter % args.trajectory_segment != 0:                 # fixed-length trajectory segments
-                states = torch.tensor(states, **tensor_kwargs)
-                actions = agent.act(states)                            # select an action set for each agent
-                env_info = env.step(actions.detach().numpy())[brain_name] # send all actions to tne environment
-                next_states = torch.tensor(env_info.vector_observations, **tensor_kwargs) # get next state (for each agent)
-                rewards = torch.tensor(env_info.rewards, **tensor_kwargs) # get reward (for each agent)
-                agent.build_trajectory(states, actions.to(device), rewards, next_states) # log SARS quartuplets for optimization
-                dones = env_info.local_done                            # see if episode finished
-                scores += env_info.rewards                             # update the score (for each agent)
-                states = next_states                                   # roll over states to next time step
-                if np.any(dones):                                      # exit loop if episode finished
-                    break
-                iter+=1                                                # increment iteration counter
-            if np.any(dones):                                          # exit loop if episode is finished
+        start = time.time()                                                             # start time for training episode completion timer
+        scores = np.zeros(num_agents)                                                   # preallocate and initialize episode scores per agent
+        env_info = env.reset(train_mode=True)[brain_name]
+        states = env_info.vector_observations                                           # obtain starting states from environment reset
+        for t in range(args.max_iterations):
+            actions = agent.act(states)                                                 # obtain action from agent, based on policy
+            env_info = env.step(actions)[brain_name]                                    # update environment based on agent actions
+            next_states = env_info.vector_observations                                  # obtain next states from updated environment
+            rewards = env_info.rewards                                                  # reward for taking the action from the state
+            dones = env_info.local_done                                                 # check for whether the environment has met exit criteria
+            agent.step(states, actions, rewards, next_states, dones)                    # record trajectory points for agent optimization
+            states = next_states                                                        # update states
+            scores += rewards                                                           # increment running score with rewards from current step
+            if np.any(dones):                                                           # check for environment termination
                 break
-            agent.learn()                                              # optimize policy using trajectories
-            iter+=1                                                    # increment iteration counter to move to next trajectory segment
-        print('Total score (averaged over agents) this episode: {}'.format(np.mean(scores)))
-        np.append(avg_scores,np.mean(scores))                          # append episode average score to assess environment solution
-        if(episode >= 99 and np.mean(avg_scores) >= 33):
-            print(f'Environment solved! Average score over 100 episodes: {np.mean(avg_scores[-100:])}') # solution exit criteria
-            break
-        if (episode==args.training_episodes-1):
-            print('Max training episodes reached!')
-    print("Closing Unity environment...")
-    env.close()
-    print("Training Complete!")
-
-    '''
-    plt.figure()
-    plt.plot(range(args.training_episodes),avg_scores)
-    plt.xlabel('Episode')
-    plt.yabel('Average Score')
-    plt.show()
-    '''
-
-
-def demoTrainedAgent(env, agentFile, n_episodes=100, max_t=200):
-    #TODO: implement trained agent demonstration
-    pass
-
+            if (t+1) % args.trajectory_segment == 0:                                    # fixed-length trajectory segments
+                agent.step(None, None, None, None, None, optimize=True)                 # optimization (no need to provide sars data)
+        scores_deque.append(np.mean(scores))                                            # record mean score for episode
+        print('Episode {}\tAverage Score: {:.2f}\tTime: {:.2f}'.format(episode+1, np.mean(scores), (time.time()-start)), end="\r")
+        if np.mean(scores_deque) >= 33 and len(scores_deque) == 100:                    # check for environment solution
+            print("\nEnvironment solved in {:.d} episodes!".format(episode+1))
+            torch.save(agent.actor.state_dict(), 'solution_actor.pth')                  # save actor weights and model
+            torch.save(agent.critic.state_dict(), 'solution_critic.pth')                # save critic weights and model
+            break                                                                       # exit training loop if environment solved
+        if episode+1 == args.training_episodes:                                         # maximum number of training episodes reached
+            print('\nMax training episodes reached without environment solution!')
+    return scores_deque
 
 if __name__=="__main__":
     warnings.filterwarnings("ignore",category=UserWarning)                              # ignore torch deprecation warnings
     # command line arguments
     print('Parsing command line arguments...')
-    args = argparser()
+    args = argparser()                                                                  # parse command line hyperparameter arguments
     # environment setup
-    print("Setting up environment...")
+    print('Setting up environment...')
     path = "C:/Users/josia/Documents/Education/Udacity_Nanodegrees/Udacity_Deep_RL_Nanodegree/Policy_Based_Methods/Project/DeepRLND-Continuous-Control/Reacher_Windows_x86_64/Reacher.exe"
-    env = UnityEnvironment(file_name=path)
+    env = UnityEnvironment(file_name=path)                                              # start Unity environment
+    # train agent
+    print('Entering training loop...')
+    scores = ppo(env, args)                                                             # run ppo training loop
+    print('Closing Unity environment...')
+    env.close()                                                                         # close environment
+    print('Training Complete!')
 
-    # take action based on mode selection
-    if args.mode=="training":
-        print("Training agents using PPO algorithm...")
-        ppo(env, args)
-    else:
-        print("Demonstrating trained agent...")
-        # trained agent checkpoint file collection
-        while True:
-            agentFile = input("Enter the path to the trained agent checkpoint .pth file: ").replace("\\","/")
-            if not os.path.exists(agentFile):                                                               # if the file does not exist
-                print("The file path you entered could not be found. Please check the path and try again.\n")
-            else:
-                print("Loading agent checkpoint at %s..." % agentFile)
-                break
-        print('\nBeginning Demonstration Run of Trained Agent...')
-        demoTrainedAgent(env,agentFile)
-        pass
-
-    # results post-processing
-    #TODO: implement post-processing for graphical representation of training
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    plt.plot(np.arange(1, len(scores)+1), scores)                                       # plot average scores per episode
+    plt.ylabel('Score')
+    plt.xlabel('Episode #')
+    plt.savefig('avg_score.png')
+    plt.show()

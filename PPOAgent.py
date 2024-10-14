@@ -103,7 +103,8 @@ class Agent():
         ======
             actions (tensor[num_agents,action_size]): actions probabilistically selected based on current state
         """
-        [mu, sigma] = self.actor.forward(states)                                # pass states to actor network to obtain Gaussian parameters
+        with torch.no_grad():
+            [mu, sigma] = self.actor.forward(states)                            # pass states to actor network to obtain Gaussian parameters
         actions = torch.tensor([], **self.tensor_kwargs)                        # pre-allocate actions tensor
         for loc, scale in zip(mu, sigma):
             dist = Normal(loc, scale)                                           # form a Gaussian distribution with actor output
@@ -151,7 +152,7 @@ class Agent():
             print()
 
     def actionProbRatios(self,states,actions):
-        """Determine probability of selecting an action based on policy
+        """Determine probability ratios for current and old policies of selecting an action based on policy
         Params
         ======
             states (tensor): state from which the selected action was taken
