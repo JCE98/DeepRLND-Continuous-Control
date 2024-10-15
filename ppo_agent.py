@@ -38,13 +38,13 @@ class ReplayBuffer:
         experiences = random.sample(self.memory, k=self.batch_size)                 # random sample from shuffled common experience deque
         tensor_kwargs = {'dtype':torch.float32, 'device':self.device, 'requires_grad':True} # keyword arguments for tensor generation
 
-        states = torch.tensor(np.vstack([e.state for e in experiences if e is not None]), **tensor_kwargs)
-        actions = torch.tensor(np.vstack([e.action for e in experiences if e is not None]), **tensor_kwargs)
-        rewards = torch.tensor(np.vstack([e.reward for e in experiences if e is not None]), **tensor_kwargs)
-        next_states = torch.tensor(np.vstack([e.next_state for e in experiences if e is not None]), **tensor_kwargs)
-        dones = torch.tensor(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8), **tensor_kwargs)
-        prob_ratios = torch.tensor(np.vstack([e.prob_ratio for e in experiences if e is not None]), **tensor_kwargs)
-        advantages = torch.tensor(np.vstack([e.advantage for e in experiences if e is not None]), **tensor_kwargs)
+        states = torch.vstack([e.state for e in experiences if e is not None])
+        actions = torch.vstack([e.action for e in experiences if e is not None])
+        rewards = torch.vstack([e.reward for e in experiences if e is not None])
+        next_states = torch.vstack([e.next_state for e in experiences if e is not None])
+        dones = torch.vstack([e.done for e in experiences if e is not None])
+        prob_ratios = torch.vstack([e.prob_ratio for e in experiences if e is not None])
+        advantages = torch.vstack([e.advantage for e in experiences if e is not None])
 
         return (states, actions, rewards, next_states, dones, prob_ratios, advantages)
 
@@ -57,6 +57,7 @@ class Agent:
     def __init__(self, state_size, action_size, num_agents, args, random_seed):
         # agent/model construction parameters
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu") # tensor casting device
+        self.tensor_kwargs = {'device':self.device, 'dtype':torch.float32, 'requires_grad':True}
         self.state_size = state_size
         self.action_size = action_size
         self.num_agents = num_agents
@@ -84,13 +85,17 @@ class Agent:
 
     def act(self, states):
         with torch.no_grad():
-            [mu, sigma] = self.actor(torch.from_numpy(states))
-        actions = deque(maxlen=self.num_agents*self.action_size)                # pre-allocate flattened actions container
-        for loc, scale in zip(mu, sigma):                                       # iterate over actor output tensors for each agent
-            for mean, std in zip(loc, scale):                                   # iterate over each pair in actor outputs
+            [mu, sigma] = self.actor(states)
+        actions = torch.normal(mu, sigma)
+        '''
+        actions = torch.empty((self.num_agents,self.action_size))               # pre-allocate flattened actions container
+        for idx, (loc, scale) in enumerate(zip(mu, sigma)):                     # iterate over actor output tensors for each agent
+            for jdx, (mean, std) in enumerate(zip(loc, scale)):                 # iterate over each pair in actor outputs
                 dist = Normal(mean, std)                                        # form a Gaussian distribution with actor output
-                actions.append(dist.sample().item())                            # add action from a sample of each Gaussian distribution to deque
+                actions[idx,jdx] = dist.sample().item()                         # add action from a sample of each Gaussian distribution to deque
         return np.array(actions).reshape(self.num_agents, self.action_size)     # reshape actions to pass back to environment
+        '''
+        return actions
     
     def actionProbRatios(self, states, actions):
         """Determine probability ratios for current and old policies of selecting an action based on policy
@@ -99,21 +104,25 @@ class Agent:
             states (tensor): state from which the selected action was taken
             actions (tensor): action that was taken
         """
-        probs = np.empty(actions.shape)                                         # initialize probabilities arrays
-        probs_old = np.empty(actions.shape)
-        for idx, policy in enumerate([self.actor, self.actor_old]):             # iterate over actor and actor_old policies
-            prob = torch.empty(actions.shape)                                   # preallocate action probabilities tensor
-            [mu, sigma] = policy(states)                                        # reconstruct Gaussian distribution parameters from states
-            for index, (loc, scale) in enumerate(zip(mu, sigma)):               # iterate over pair in reconstruction
-                dist = Normal(loc, scale)                                       # form a Gaussian distribution with reconstructed actor output
-                prob[index] = dist.log_prob(actions[index])                     # fill in log probability of selecting action based on actor output reconstruction
-            if idx == 0:
-                probs = prob                                                    # assign probabilities to actor
-            elif idx == 1:
-                probs_old = prob                                                # assign probabilities to actor_old
-            else:
-                raise Exception('Probabilities not assigned!')
-        return np.abs(probs - probs_old)                                        # the probability ratio is equivalent to the difference of the log probabilities
+        probs = torch.empty(actions.shape, **self.tensor_kwargs)                # preallocate probabilities arrays
+        probs_old = torch.empty(actions.shape, **self.tensor_kwargs)
+        probs_clone = probs.clone()
+        probs_old_clone = probs_old.clone()
+
+        for policy_num, policy in enumerate([self.actor, self.actor_old]):      # iterate over actor and actor_old probabilities
+            with torch.no_grad():
+                [mu, sigma] = policy(states)                                    # reconstruct Gaussian distribution parameters from states
+            for jdx, (loc, scale, action) in enumerate(zip(mu, sigma, actions)):# iterate over reconstructed parameter pairs and taken actions
+                dist = Normal(loc, scale)                                       # reform a Gaussian distribution with reconstructed actor output
+                if policy_num == 0:
+                    probs_clone[jdx] = dist.log_prob(action)                          # assign probability to actor
+                elif policy_num == 1:
+                    probs_old_clone[jdx] = dist.log_prob(action)                      # assign probability to actor_old
+                else:
+                    raise Exception('Action probabilities not assigned!')
+        probs = probs_clone
+        probs_old = probs_clone
+        return torch.abs(probs - probs_old)                                     # the probability ratio is equivalent to the difference of the log probabilities
 
     def estimate_advantage(self):
         '''Estimate advantage of taking an action from a given state, as a measure of future reward from following the policy, based
@@ -122,21 +131,23 @@ class Agent:
         for idx, trajectory in enumerate(self.memory.trajectories):                                     # iterate over trajectories from all agents
             for jdx, experience in enumerate(trajectory):                                               # iterate over snapshots from each trajectory
                 if jdx < self.trajectory_segment-1:                                                     # advantage can only be calculated out to T-1
-                    state = torch.from_numpy(experience.state).to(self.device)
-                    action = torch.from_numpy(experience.action).to(self.device)
-                    next_state = torch.from_numpy(experience.next_state).to(self.device)
+                    state = experience.state
+                    action = experience.action
+                    next_state = experience.next_state
+                    r = self.actionProbRatios(state, action)                                            # compute action probability ratios
+                    next_action = self.memory.trajectories[idx][jdx+1].action
                     with torch.no_grad():
-                        r = self.actionProbRatios(state, action)                                        # compute action probability ratios
-                        next_action = torch.from_numpy(self.memory.trajectories[idx][jdx+1].action).to(self.device)
-                        delta = r + self.gamma*self.critic(next_state, next_action) - self.critic(state, action)
-                        self.memory.trajectories[idx][jdx] = experience._replace(prob_ratio=r, delta=delta) # fill in action probabilities and delta terms in experience named tuples by trajectory
+                        V_state = self.critic(state, action)
+                        V_next_state = self.critic(next_state, next_action)
+                    delta = r + self.gamma*V_next_state - V_state
+                    self.memory.trajectories[idx][jdx] = experience._replace(prob_ratio=r, delta=delta) # fill in action probabilities and delta terms in experience named tuples by trajectory
         
         for idx, trajectory in enumerate(self.memory.trajectories):                                     # iterate over trajectories from all agents
             for jdx, experience in enumerate(trajectory):                                               # iterate over snapshots from each trajectory
-                advantage = torch.zeros(delta.shape)                                                    # preallocate and initialize advantage estimate
+                advantage = torch.zeros(delta.shape, **self.tensor_kwargs)                              # preallocate and initialize advantage estimate
                 if jdx < self.trajectory_segment-1:                                                     # advantage can only be calculated out to T-1
                     delta = experience.delta
-                    advantage += ((self.gamma*self.lambd)**(self.trajectory_segment-1-jdx))*delta       # calculate advantage
+                    advantage = advantage + ((self.gamma*self.lambd)**(self.trajectory_segment-1-jdx))*delta # calculate advantage
                     self.memory.trajectories[idx][jdx] = experience._replace(advantage=advantage)       # fill in advantage in snapshot trajectory tuples
 
     def step(self, states, actions, rewards, next_states, dones, optimize=False):
@@ -164,7 +175,8 @@ class Agent:
     
     def MSELoss(self, states, actions, rewards):
         reward = torch.mean(rewards)
-        Vpred = self.critic(states, actions)
+        with torch.no_grad():
+            Vpred = self.critic(states, actions)
         mseloss = (reward - Vpred)**2
         return mseloss
 
@@ -186,7 +198,7 @@ class Agent:
                 Lclip = self.clipped_surrogate(prob_ratio, advantage)
                 LVF_MSELoss = self.MSELoss(state, action, reward)
                 loss = -torch.mean(Lclip - LVF_MSELoss)
-                loss.backward()
+                loss.backward(retain_graph=True)
                 with torch.no_grad():
                     self.actor_optimizer.step()
                     self.critic_optimizer.step()

@@ -24,33 +24,37 @@ def argparser():
     return args
 
 def ppo(env, args):
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")             # tensor casting device
+    tensor_kwargs = {'device':device, 'dtype':torch.float32, 'requires_grad':True}      # keyword arguments for tensor instatntiation
     brain_name = env.brain_names[0]
     brain = env.brains[brain_name]
     env_info = env.reset(train_mode=False)[brain_name]
     num_agents = len(env_info.agents)
     state_size = env_info.vector_observations.shape[1]
     action_size = brain.vector_action_space_size
-    scores_deque = deque(maxlen=100)                                                    # container to capture mean scores from each episode
+    scores_deque = deque(maxlen=100)                                                    # container to capture mean scores from the last 100 episodes for exit criteria
+    scores_array = np.array([])                                                         # container to capture mean scores from each episode for plotting
     agent = Agent(state_size, action_size, num_agents, args, random_seed=10)            # instantiate agent object
     for episode in range(args.training_episodes):
         start = time.time()                                                             # start time for training episode completion timer
-        scores = np.zeros(num_agents)                                                   # preallocate and initialize episode scores per agent
+        scores = torch.zeros(num_agents)                                                   # preallocate and initialize episode scores per agent
         env_info = env.reset(train_mode=True)[brain_name]
-        states = env_info.vector_observations                                           # obtain starting states from environment reset
+        states = torch.tensor(env_info.vector_observations, **tensor_kwargs)            # obtain starting states from environment reset
         for t in range(args.max_iterations):
             actions = agent.act(states)                                                 # obtain action from agent, based on policy
-            env_info = env.step(actions)[brain_name]                                    # update environment based on agent actions
-            next_states = env_info.vector_observations                                  # obtain next states from updated environment
-            rewards = env_info.rewards                                                  # reward for taking the action from the state
-            dones = env_info.local_done                                                 # check for whether the environment has met exit criteria
+            env_info = env.step(actions.detach().numpy())[brain_name]                   # update environment based on agent actions
+            next_states = torch.tensor(env_info.vector_observations, **tensor_kwargs)   # obtain next states from updated environment
+            rewards = torch.tensor(env_info.rewards, **tensor_kwargs)                   # reward for taking the action from the state
+            dones = torch.tensor(env_info.local_done)                                   # check for whether the environment has met exit criteria
             agent.step(states, actions, rewards, next_states, dones)                    # record trajectory points for agent optimization
             states = next_states                                                        # update states
             scores += rewards                                                           # increment running score with rewards from current step
-            if np.any(dones):                                                           # check for environment termination
+            if any(dones):                                                              # check for environment termination
                 break
             if (t+1) % args.trajectory_segment == 0:                                    # fixed-length trajectory segments
                 agent.step(None, None, None, None, None, optimize=True)                 # optimization (no need to provide sars data)
         scores_deque.append(np.mean(scores))                                            # record mean score for episode
+        scores_array = np.append(scores_array, np.mean(scores))
         print('Episode {}\tAverage Score: {:.2f}\tTime: {:.2f}'.format(episode+1, np.mean(scores), (time.time()-start)), end="\r")
         if np.mean(scores_deque) >= 33 and len(scores_deque) == 100:                    # check for environment solution
             print("\nEnvironment solved in {:.d} episodes!".format(episode+1))
@@ -59,7 +63,7 @@ def ppo(env, args):
             break                                                                       # exit training loop if environment solved
         if episode+1 == args.training_episodes:                                         # maximum number of training episodes reached
             print('\nMax training episodes reached without environment solution!')
-    return scores_deque
+    return scores_array
 
 if __name__=="__main__":
     warnings.filterwarnings("ignore",category=UserWarning)                              # ignore torch deprecation warnings

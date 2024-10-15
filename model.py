@@ -31,11 +31,11 @@ class Actor(nn.Module):
         ======
             state (tensor): state input to actor neural network
         """
-        state = state.float()
-        x = F.relu(self.fc1(state))                                             # input layer with relu activation 
-        x = F.relu(self.fc2(x))                                                 # fully connected layer with relu activation
-        mu = F.tanh(self.fc3(x))                                                # output layer with tanh activation (Gaussian location)
-        sigma = F.sigmoid(self.fc3(x))                                          # output layer with sigmoid activation (Gaussian scale)
+        #state = state.float()
+        x1 = F.relu(self.fc1(state))                                             # input layer with relu activation 
+        x2 = F.relu(self.fc2(x1))                                                 # fully connected layer with relu activation
+        mu = F.tanh(self.fc3(x2))                                                # output layer with tanh activation (Gaussian location)
+        sigma = F.sigmoid(self.fc3(x2))                                          # output layer with sigmoid activation (Gaussian scale)
         return mu, sigma
     
 class Critic(nn.Module):
@@ -64,7 +64,7 @@ class Critic(nn.Module):
             state (tensor): state input to state-action value function neural network
             action (tensor): action input to state-action value function neural network
         """
-        input = torch.cat((state, action)).float()
-        x = F.relu(self.fc1(input))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
+        input = torch.cat((state, action), dim=-1)
+        x1 = F.relu(self.fc1(input))
+        x2 = F.relu(self.fc2(x1))
+        return self.fc3(x2)
