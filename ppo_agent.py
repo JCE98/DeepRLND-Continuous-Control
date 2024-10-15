@@ -73,11 +73,11 @@ class Agent:
         self.trajectory_segment = args.trajectory_segment
 
         # neural network models
-        self.actor = Actor(state_size, action_size, random_seed, args.actorFCunits[0], args.actorFCunits[1])
-        self.actor_old = Actor(state_size, action_size, random_seed, args.actorFCunits[0], args.actorFCunits[1])
+        self.actor = Actor(state_size, action_size, random_seed, args.actorFCunits[0], args.actorFCunits[1]).to(self.device)
+        self.actor_old = Actor(state_size, action_size, random_seed, args.actorFCunits[0], args.actorFCunits[1]).to(self.device)
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=args.learning_rate)
 
-        self.critic = Critic(state_size, action_size, random_seed, args.criticFCunits[0], args.criticFCunits[1])
+        self.critic = Critic(state_size, action_size, random_seed, args.criticFCunits[0], args.criticFCunits[1]).to(self.device)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=args.learning_rate)
 
         # Replay memory
@@ -204,5 +204,9 @@ class Agent:
                     self.critic_optimizer.step()
                 self.actor_optimizer.zero_grad()
                 self.critic_optimizer.zero_grad()
-        self.actor_old.parameters = self.actor.parameters()        
+        actor_weights = self.actor.state_dict()
+        actor_old_weights = self.actor_old.state_dict()
+        for name, param in actor_weights.items():
+            actor_old_weights[name].copy_(param)
+        self.actor_old.load_state_dict(actor_old_weights)        
     

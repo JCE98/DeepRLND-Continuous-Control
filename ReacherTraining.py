@@ -42,20 +42,20 @@ def ppo(env, args):
         states = torch.tensor(env_info.vector_observations, **tensor_kwargs)            # obtain starting states from environment reset
         for t in range(args.max_iterations):
             actions = agent.act(states)                                                 # obtain action from agent, based on policy
-            env_info = env.step(actions.detach().numpy())[brain_name]                   # update environment based on agent actions
+            env_info = env.step(actions.cpu().detach().numpy())[brain_name]             # update environment based on agent actions
             next_states = torch.tensor(env_info.vector_observations, **tensor_kwargs)   # obtain next states from updated environment
             rewards = torch.tensor(env_info.rewards, **tensor_kwargs)                   # reward for taking the action from the state
             dones = torch.tensor(env_info.local_done)                                   # check for whether the environment has met exit criteria
             agent.step(states, actions, rewards, next_states, dones)                    # record trajectory points for agent optimization
             states = next_states                                                        # update states
-            scores += rewards                                                           # increment running score with rewards from current step
+            scores += rewards.cpu().detach()                                            # increment running score with rewards from current step
             if any(dones):                                                              # check for environment termination
                 break
             if (t+1) % args.trajectory_segment == 0:                                    # fixed-length trajectory segments
                 agent.step(None, None, None, None, None, optimize=True)                 # optimization (no need to provide sars data)
-        scores_deque.append(np.mean(scores))                                            # record mean score for episode
-        scores_array = np.append(scores_array, np.mean(scores))
-        print('Episode {}\tAverage Score: {:.2f}\tTime: {:.2f}'.format(episode+1, np.mean(scores), (time.time()-start)), end="\r")
+        scores_deque.append(torch.mean(scores).item())                                  # record mean score for episode
+        scores_array = np.append(scores_array, torch.mean(scores).item())
+        print('Episode {}\tAverage Score: {:.2f}\tTime: {:.2f}'.format(episode+1, torch.mean(scores).item(), (time.time()-start)), end="\r")
         if np.mean(scores_deque) >= 33 and len(scores_deque) == 100:                    # check for environment solution
             print("\nEnvironment solved in {:.d} episodes!".format(episode+1))
             torch.save(agent.actor.state_dict(), 'solution_actor.pth')                  # save actor weights and model
