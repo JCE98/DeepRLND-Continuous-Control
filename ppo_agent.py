@@ -22,10 +22,11 @@ class ReplayBuffer:
                                      field_names=["state", "action", "reward", "next_state", "done", "prob_ratio", "delta", "advantage"])
         self.seed = random.seed(seed)
 
-    def add(self, agent_index, state, action, reward, next_state, done):
+    def add(self, states, actions, rewards, next_states, dones):
         """Add a new experience to memory."""
-        e = self.experience(state, action, reward, next_state, done, prob_ratio=None, delta=None, advantage=None) # initizlize experience named tuple
-        self.trajectories[agent_index].append(e)                                    # append experience named tuple to trajectory deque
+        for agent_index, (state, action, reward, next_state, done) in enumerate(zip(states, actions, rewards, next_states, dones)):
+            e = self.experience(state, action, reward, next_state, done, prob_ratio=None, delta=None, advantage=None) # initizlize experience named tuple
+            self.trajectories[agent_index].append(e)                                    # append experience named tuple to trajectory deque
 
     def flatten_experiences(self):
         for trajectory in self.trajectories:                                        # iterate over trajectories from each agent
@@ -119,14 +120,14 @@ class Agent:
             for jdx, (loc, scale, action) in enumerate(zip(mu, sigma, actions)):# iterate over reconstructed parameter pairs and taken actions
                 dist = Normal(loc, scale)                                       # reform a Gaussian distribution with reconstructed actor output
                 if policy_num == 0:
-                    probs_clone[jdx] = dist.log_prob(action)                          # assign probability to actor
+                    probs_clone[jdx] = dist.log_prob(action)                    # assign probability to actor
                 elif policy_num == 1:
-                    probs_old_clone[jdx] = dist.log_prob(action)                      # assign probability to actor_old
+                    probs_old_clone[jdx] = dist.log_prob(action)                # assign probability to actor_old
                 else:
                     raise Exception('Action probabilities not assigned!')
         probs = probs_clone
         probs_old = probs_clone
-        return torch.abs(probs - probs_old)                                     # the probability ratio is equivalent to the difference of the log probabilities
+        return probs - probs_old                                                # the probability ratio is equivalent to the difference of the log probabilities
 
     def estimate_advantage(self):
         '''Estimate advantage of taking an action from a given state, as a measure of future reward from following the policy, based
@@ -155,19 +156,6 @@ class Agent:
                     delta = experience.delta
                     advantage = advantage + ((self.gamma*self.lambd)**(self.trajectory_segment-1-jdx))*delta # calculate advantage
                     self.memory.trajectories[idx][jdx] = experience._replace(advantage=advantage)       # fill in advantage in snapshot trajectory tuples
-
-    def step(self, states, actions, rewards, next_states, dones, optimize=False):
-        """Save experience in replay memory, and use random sample from buffer to learn."""
-        if not optimize:
-            # Save experience / reward
-            for agent_index, (state, action, reward, next_state, done) in enumerate(zip(states, actions, rewards, next_states, dones)):
-                self.memory.add(agent_index, state, action, reward, next_state, done)
-        
-        if optimize:
-            # Learn, if enough samples are available in memory
-            self.estimate_advantage()                                           # calculate advantage estimates for snapshots in trajectory
-            self.memory.flatten_experiences()                                   # flatten trajectories into common experience pool
-            self.learn()
 
     def clipped_surrogate(self, prob_ratio, advantage):
         '''Calculate the clipped surrogate function for a given action
@@ -199,22 +187,26 @@ class Agent:
             experiences (Tuple[torch.Tensor]): tuple of (s, a, r, s', done, prob_ratio, delta, advantage) tuples 
             gamma (float): discount factor
         """
-        for eopch in range(self.optimization_epochs):
-            experiences = self.memory.sample()
+        self.estimate_advantage()                                           # calculate advantage estimates for snapshots in trajectory
+        self.memory.flatten_experiences()                                   # flatten trajectories into common experience pool
+        for epoch in range(self.optimization_epochs):
+            self.actor_optimizer.zero_grad()                                # set optimizer gradients back to zero
+            self.critic_optimizer.zero_grad()
+            loss = torch.zeros(1, **self.tensor_kwargs)                     # initialize loss tensor
+            experiences = self.memory.sample()                              # random sample experiences with batch_size
             states, actions, rewards, next_states, dones, prob_ratios, advantages = experiences
             for state, action, reward, prob_ratio, advantage in zip(states, actions, rewards, prob_ratios, advantages):
-                Lclip = self.clipped_surrogate(prob_ratio, advantage)
-                LVF_MSELoss = self.MSELoss(state, action, reward)
-                loss = -torch.mean(Lclip - LVF_MSELoss)
-                loss.backward(retain_graph=True)
-                with torch.no_grad():
-                    self.actor_optimizer.step()
-                    self.critic_optimizer.step()
-                self.actor_optimizer.zero_grad()
-                self.critic_optimizer.zero_grad()
+                Lclip = self.clipped_surrogate(prob_ratio, advantage)       # clipped surrogate function
+                LVF_MSELoss = self.MSELoss(state, action, reward)           # state-action value function MSE loss
+                loss = loss + (Lclip - LVF_MSELoss)
+            loss = -torch.mean(loss/self.batch_size)                        # empirical average over a finite batch of samples
+            loss.backward(retain_graph=True)
+            with torch.no_grad():
+                self.actor_optimizer.step()                                 # calculate gradients of neural net parameters and take step
+                self.critic_optimizer.step()
         actor_weights = self.actor.state_dict()
         actor_old_weights = self.actor_old.state_dict()
         for name, param in actor_weights.items():
-            actor_old_weights[name].copy_(param)
+            actor_old_weights[name].copy_(param)                            # actor_old -> actor
         self.actor_old.load_state_dict(actor_old_weights)        
     

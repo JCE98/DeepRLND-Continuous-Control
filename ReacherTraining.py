@@ -35,7 +35,7 @@ def ppo(env, args):
     scores_deque = deque(maxlen=100)                                                    # container to capture mean scores from the last 100 episodes for exit criteria
     scores_array = np.array([])                                                         # container to capture mean scores from each episode for plotting
     agent = Agent(state_size, action_size, num_agents, args, random_seed=10)            # instantiate agent object
-    for episode in range(1,args.training_episodes):
+    for episode in range(1,args.training_episodes+1):
         start = time.time()                                                             # start time for training episode completion timer
         scores = torch.zeros(num_agents)                                                   # preallocate and initialize episode scores per agent
         env_info = env.reset(train_mode=True)[brain_name]
@@ -46,16 +46,16 @@ def ppo(env, args):
             next_states = torch.tensor(env_info.vector_observations, **tensor_kwargs)   # obtain next states from updated environment
             rewards = torch.tensor(env_info.rewards, **tensor_kwargs)                   # reward for taking the action from the state
             dones = torch.tensor(env_info.local_done)                                   # check for whether the environment has met exit criteria
-            agent.step(states, actions, rewards, next_states, dones)                    # record trajectory points for agent optimization
+            agent.memory.add(states, actions, rewards, next_states, dones)              # record trajectory points for agent optimization
             states = next_states                                                        # update states
             scores += rewards.cpu().detach()                                            # increment running score with rewards from current step
             if any(dones):                                                              # check for environment termination
                 break
             if (t+1) % args.trajectory_segment == 0:                                    # fixed-length trajectory segments
-                agent.step(None, None, None, None, None, optimize=True)                 # optimization (no need to provide sars data)
+                agent.learn()                                                           # optimization
         scores_deque.append(torch.mean(scores).item())                                  # record mean score for episode
         scores_array = np.append(scores_array, torch.mean(scores).item())
-        print('Episode {}\tAverage Score: {:.2f}\tTime: {:.2f}'.format(episode, torch.mean(scores).item(), (time.time()-start)), end="\r")
+        print('\rEpisode {}\tAverage Score: {:.2f}\tTime: {:.2f}'.format(episode, torch.mean(scores).item(), (time.time()-start)))
         if episode % 100 == 0:
             torch.save(agent.actor.state_dict(), 'checkpoint_actor.pth')
             torch.save(agent.critic.state_dict(), 'checkpoint_critic.pth')
@@ -65,7 +65,7 @@ def ppo(env, args):
             torch.save(agent.actor.state_dict(), 'solution_actor.pth')                  # save actor weights and model
             torch.save(agent.critic.state_dict(), 'solution_critic.pth')                # save critic weights and model
             break                                                                       # exit training loop if environment solved
-        if episode+1 == args.training_episodes:                                         # maximum number of training episodes reached
+        if episode == args.training_episodes:                                           # maximum number of training episodes reached
             print('\nMax training episodes reached without environment solution!')
     return scores_array
 
