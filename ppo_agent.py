@@ -140,9 +140,11 @@ class Agent:
                     next_state = experience.next_state
                     r = self.actionProbRatios(state, action)                                            # compute action probability ratios
                     next_action = self.memory.trajectories[idx][jdx+1].action
+                    self.critic.eval()
                     with torch.no_grad():
                         V_state = self.critic(state, action)
                         V_next_state = self.critic(next_state, next_action)
+                    self.critic.train()
                     delta = r + self.gamma*V_next_state - V_state
                     self.memory.trajectories[idx][jdx] = experience._replace(prob_ratio=r, delta=delta) # fill in action probabilities and delta terms in experience named tuples by trajectory
         
@@ -179,8 +181,10 @@ class Agent:
     
     def MSELoss(self, states, actions, rewards):
         reward = torch.mean(rewards)
+        self.critic.eval()
         with torch.no_grad():
             Vpred = self.critic(states, actions)
+        self.critic.train()
         mseloss = (reward - Vpred)**2
         return mseloss
 
