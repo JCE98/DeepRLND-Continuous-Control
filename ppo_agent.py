@@ -84,8 +84,10 @@ class Agent:
         self.memory = ReplayBuffer(num_agents, action_size, args.trajectory_segment, args.minibatch_size, random_seed)
 
     def act(self, states):
+        self.actor.eval()
         with torch.no_grad():
             [mu, sigma] = self.actor(states)
+        self.actor.train()
         actions = torch.normal(mu, sigma)
         '''
         actions = torch.empty((self.num_agents,self.action_size))               # pre-allocate flattened actions container
@@ -110,8 +112,10 @@ class Agent:
         probs_old_clone = probs_old.clone()
 
         for policy_num, policy in enumerate([self.actor, self.actor_old]):      # iterate over actor and actor_old probabilities
+            policy.eval()
             with torch.no_grad():
                 [mu, sigma] = policy(states)                                    # reconstruct Gaussian distribution parameters from states
+            policy.train()
             for jdx, (loc, scale, action) in enumerate(zip(mu, sigma, actions)):# iterate over reconstructed parameter pairs and taken actions
                 dist = Normal(loc, scale)                                       # reform a Gaussian distribution with reconstructed actor output
                 if policy_num == 0:
