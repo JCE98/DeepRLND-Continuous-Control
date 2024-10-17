@@ -1,6 +1,7 @@
 import random, torch
 import numpy as np
 from torch.distributions import Normal
+import torch.nn.functional as F
 from collections import deque, namedtuple
 from torch import optim
 from model import Actor, Critic
@@ -39,13 +40,13 @@ class ReplayBuffer:
         experiences = random.sample(self.memory, k=self.batch_size)                 # random sample from shuffled common experience deque
         tensor_kwargs = {'dtype':torch.float32, 'device':self.device, 'requires_grad':True} # keyword arguments for tensor generation
 
-        states = torch.vstack([e.state for e in experiences if e is not None])
-        actions = torch.vstack([e.action for e in experiences if e is not None])
-        rewards = torch.vstack([e.reward for e in experiences if e is not None])
-        next_states = torch.vstack([e.next_state for e in experiences if e is not None])
-        dones = torch.vstack([e.done for e in experiences if e is not None])
-        prob_ratios = torch.vstack([e.prob_ratio for e in experiences if e is not None])
-        advantages = torch.vstack([e.advantage for e in experiences if e is not None])
+        states = torch.from_numpy(np.vstack([e.state for e in experiences if e is not None])).float().to(self.device)
+        actions = torch.from_numpy(np.vstack([e.action for e in experiences if e is not None])).float().to(self.device)
+        rewards = torch.from_numpy(np.vstack([e.reward for e in experiences if e is not None])).float().to(self.device)
+        next_states = torch.from_numpy(np.vstack([e.next_state for e in experiences if e is not None])).float().to(self.device)
+        dones = torch.from_numpy(np.vstack([e.done for e in experiences if e is not None]).astype(np.uint8)).float().to(self.device)
+        prob_ratios = torch.from_numpy(np.vstack([e.prob_ratio for e in experiences if e is not None])).float().to(self.device)
+        advantages = torch.from_numpy(np.vstack([e.advantage for e in experiences if e is not None])).float().to(self.device)
 
         return (states, actions, rewards, next_states, dones, prob_ratios, advantages)
 
@@ -85,6 +86,7 @@ class Agent:
         self.memory = ReplayBuffer(num_agents, action_size, args.trajectory_segment, args.minibatch_size, random_seed)
 
     def act(self, states):
+        states = torch.from_numpy(states).float().to(self.device)
         self.actor.eval()
         self.actor_old.eval()
         with torch.no_grad():
@@ -99,7 +101,7 @@ class Agent:
         probs_old = dists_old.log_prob(actions)
         prob_ratios = probs - probs_old                                         # probability ratio (equivalent to difference of log probs)
         
-        return actions, prob_ratios
+        return actions.cpu().numpy(), prob_ratios.cpu().numpy()
     
     def estimate_advantage(self):
         '''Estimate advantage of taking an action from a given state, as a measure of future reward from following the policy, based
@@ -108,46 +110,24 @@ class Agent:
         for idx, trajectory in enumerate(self.memory.trajectories):                                     # iterate over trajectories from all agents
             for jdx, experience in enumerate(trajectory):                                               # iterate over snapshots from each trajectory
                 if jdx < self.trajectory_segment-1:                                                     # advantage can only be calculated out to T-1
-                    state = experience.state
-                    action = experience.action
-                    next_state = experience.next_state
+                    state = torch.from_numpy(experience.state).float().to(self.device)
+                    action = torch.from_numpy(experience.action).float().to(self.device)
+                    next_state = torch.from_numpy(experience.next_state).float().to(self.device)
                     r = experience.prob_ratio                                                           # compute action probability ratios
-                    next_action = self.memory.trajectories[idx][jdx+1].action
-                    self.critic.eval()
-                    with torch.no_grad():
-                        V_state = self.critic(state, action)
-                        V_next_state = self.critic(next_state, next_action)
-                    self.critic.train()
+                    next_action = torch.from_numpy(self.memory.trajectories[idx][jdx+1].action).float().to(self.device)
+                    V_state = self.critic(state, action).cpu().item()
+                    V_next_state = self.critic(next_state, next_action).cpu().item()
                     delta = r + self.gamma*V_next_state - V_state
                     self.memory.trajectories[idx][jdx] = experience._replace(delta=delta)               # fill in action probabilities and delta terms in experience named tuples by trajectory
         
         for idx, trajectory in enumerate(self.memory.trajectories):                                     # iterate over trajectories from all agents
             for jdx, experience in enumerate(trajectory):                                               # iterate over snapshots from each trajectory
-                advantage = torch.zeros(delta.shape, **self.tensor_kwargs)                              # preallocate and initialize advantage estimate
+                advantage = np.zeros(delta.shape)                                                       # preallocate and initialize advantage estimate
                 if jdx < self.trajectory_segment-1:                                                     # advantage can only be calculated out to T-1
                     delta = experience.delta
                     advantage = advantage + ((self.gamma*self.lambd)**(self.trajectory_segment-1-jdx))*delta # calculate advantage
                     self.memory.trajectories[idx][jdx] = experience._replace(advantage=advantage)       # fill in advantage in snapshot trajectory tuples
-
-    def clipped_surrogate(self, prob_ratio, advantage):
-        '''Calculate the clipped surrogate function for a given action
-        Params
-        ======
-            probs       (tensor): probability ratios that actions would be taken under the new policy, as opposed to the previous one
-            advantages  (tensor): advantage estimate of having taken that action, as a measure of future reward from following this policy
-        '''
-        Lclip = torch.min(torch.mul(prob_ratio,advantage),torch.mul(torch.clip(prob_ratio, 1-self.epsilon_clip, 1+self.epsilon_clip),advantage))
-        return Lclip
     
-    def MSELoss(self, states, actions, rewards):
-        reward = torch.mean(rewards)
-        self.critic.eval()
-        with torch.no_grad():
-            Vpred = self.critic(states, actions)
-        self.critic.train()
-        mseloss = (reward - Vpred)**2
-        return mseloss
-
     def learn(self):
         """Update policy and value parameters using given batch of experience tuples.
         where:
@@ -168,17 +148,15 @@ class Agent:
             experiences = self.memory.sample()                              # random sample experiences with batch_size
             states, actions, rewards, next_states, dones, prob_ratios, advantages = experiences
             for state, action, reward, prob_ratio, advantage in zip(states, actions, rewards, prob_ratios, advantages):
-                Lclip = self.clipped_surrogate(prob_ratio, advantage)       # clipped surrogate function
-                LVF_MSELoss = self.MSELoss(state, action, reward)           # state-action value function MSE loss
-                loss = loss + (Lclip - LVF_MSELoss)
+                Lclip = Lclip = torch.min(torch.mul(prob_ratio,advantage),
+                                          torch.mul(torch.clip(prob_ratio, 1-self.epsilon_clip, 1+self.epsilon_clip),advantage))
+                V_pred = self.critic(state, action)                         # predicted state-action value
+                LVF_MSELoss = F.mse_loss(V_pred, reward)                    # state-action value function MSE loss        
+                loss = loss + (Lclip - LVF_MSELoss)                         # composite loss
             loss = -torch.mean(loss/self.batch_size)                        # empirical average over a finite batch of samples
-            loss.backward(retain_graph=True)                                # backpropogation through computational graph
+            loss.backward()                                                 # backpropogation through computational graph
             with torch.no_grad():
                 self.actor_optimizer.step()                                 # calculate gradients of neural net parameters and take step
                 self.critic_optimizer.step()
-        actor_weights = self.actor.state_dict()
-        actor_old_weights = self.actor_old.state_dict()
-        for name, param in actor_weights.items():
-            actor_old_weights[name].copy_(param)                            # actor_old -> actor
-        self.actor_old.load_state_dict(actor_old_weights)        
+        self.actor_old.load_state_dict(self.actor.state_dict())             # actor_old -> actor        
     

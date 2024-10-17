@@ -37,25 +37,26 @@ def ppo(env, args):
     agent = Agent(state_size, action_size, num_agents, args, random_seed=10)            # instantiate agent object
     for episode in range(1,args.training_episodes+1):
         start = time.time()                                                             # start time for training episode completion timer
-        scores = torch.zeros(num_agents)                                                   # preallocate and initialize episode scores per agent
+        scores = np.zeros(num_agents)                                                   # preallocate and initialize episode scores per agent
         env_info = env.reset(train_mode=True)[brain_name]
-        states = torch.tensor(env_info.vector_observations, **tensor_kwargs)            # obtain starting states from environment reset
+        states = env_info.vector_observations                                           # obtain starting states from environment reset
         for t in range(args.max_iterations):
             actions, prob_ratios = agent.act(states)                                    # obtain action from agent, based on policy
-            env_info = env.step(actions.cpu().detach().numpy())[brain_name]             # update environment based on agent actions
-            next_states = torch.tensor(env_info.vector_observations, **tensor_kwargs)   # obtain next states from updated environment
-            rewards = torch.tensor(env_info.rewards, **tensor_kwargs)                   # reward for taking the action from the state
-            dones = torch.tensor(env_info.local_done)                                   # check for whether the environment has met exit criteria
+            env_info = env.step(actions)[brain_name]                                    # update environment based on agent actions
+            next_states = env_info.vector_observations                                  # obtain next states from updated environment
+            rewards = env_info.rewards                                                  # reward for taking the action from the state
+            dones = env_info.local_done                                                 # check for whether the environment has met exit criteria
             agent.memory.add(states, actions, rewards, next_states, dones, prob_ratios) # record trajectory points for agent optimization
             states = next_states                                                        # update states
-            scores += rewards.cpu().detach()                                            # increment running score with rewards from current step
-            if any(dones):                                                              # check for environment termination
+            scores += rewards                                                           # increment running score with rewards from current step
+            if np.any(dones):                                                           # check for environment termination
                 break
             if (t+1) % args.trajectory_segment == 0:                                    # fixed-length trajectory segments
                 agent.learn()                                                           # optimization
-        scores_deque.append(torch.mean(scores).item())                                  # record mean score for episode
-        scores_array = np.append(scores_array, torch.mean(scores).item())
-        print('\rEpisode {}\tAverage Score: {:.2f}\tTime: {:.2f}'.format(episode, torch.mean(scores).item(), (time.time()-start)),end="")
+        mean_score = np.mean(scores)
+        scores_deque.append(mean_score)                                                 # record mean score for episode
+        scores_array = np.append(scores_array, mean_score)
+        print('\rEpisode {}\tAverage Score: {:.2f}\tTime: {:.2f}'.format(episode, mean_score, (time.time()-start)),end="")
         if episode % 100 == 0:
             torch.save(agent.actor.state_dict(), 'checkpoint_actor.pth')
             torch.save(agent.critic.state_dict(), 'checkpoint_critic.pth')
@@ -70,8 +71,6 @@ def ppo(env, args):
     return scores_array
 
 def test_agent(env, episodes=100):
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")             # tensor casting device
-    tensor_kwargs = {'device':device, 'dtype':torch.float32, 'requires_grad':True}      # keyword arguments for tensor instatntiation
     brain_name = env.brain_names[0]
     brain = env.brains[brain_name]
     env_info = env.reset(train_mode=False)[brain_name]
@@ -90,10 +89,10 @@ def test_agent(env, episodes=100):
         env_info = env.reset(train_mode=False)[brain_name]     # reset the environment    
         states = env_info.vector_observations                  # get the current state (for each agent)
         agent.reset()
-        score = np.zeros(num_agents)                          # initialize the score (for each agent)
+        score = np.zeros(num_agents)                           # initialize the score (for each agent)
 
         while True:
-            actions, _ = agent.act(states)                        # select an action (for each agent)
+            actions, _ = agent.act(states)                     # select an action (for each agent)
             env_info = env.step(actions)[brain_name]           # send all actions to the environment
             next_states = env_info.vector_observations         # get next state (for each agent)
             rewards = env_info.rewards                         # get reward (for each agent)
