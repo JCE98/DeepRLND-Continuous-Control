@@ -113,16 +113,16 @@ class Agent:
                     state = torch.from_numpy(experience.state).float().to(self.device)
                     action = torch.from_numpy(experience.action).float().to(self.device)
                     next_state = torch.from_numpy(experience.next_state).float().to(self.device)
-                    r = experience.prob_ratio                                                           # compute action probability ratios
+                    reward = experience.reward
                     next_action = torch.from_numpy(self.memory.trajectories[idx][jdx+1].action).float().to(self.device)
-                    V_state = self.critic(state, action).cpu().item()
-                    V_next_state = self.critic(next_state, next_action).cpu().item()
-                    delta = r + self.gamma*V_next_state - V_state
+                    V_state = self.critic(state, action).cpu().item()                                   # evaluate the state-action value function model (critic) at the current state 
+                    V_next_state = self.critic(next_state, next_action).cpu().item()                    # evaluate the state-action value function model (critic) at the next state
+                    delta = reward + self.gamma*V_next_state - V_state
                     self.memory.trajectories[idx][jdx] = experience._replace(delta=delta)               # fill in action probabilities and delta terms in experience named tuples by trajectory
         
         for idx, trajectory in enumerate(self.memory.trajectories):                                     # iterate over trajectories from all agents
             for jdx, experience in enumerate(trajectory):                                               # iterate over snapshots from each trajectory
-                advantage = np.zeros(delta.shape)                                                       # preallocate and initialize advantage estimate
+                advantage = 0                                                                           # initialize advantage estimate
                 if jdx < self.trajectory_segment-1:                                                     # advantage can only be calculated out to T-1
                     delta = experience.delta
                     advantage = advantage + ((self.gamma*self.lambd)**(self.trajectory_segment-1-jdx))*delta # calculate advantage
